@@ -1,0 +1,217 @@
+# Load packages
+library('ggplot2') # visualization
+library('ggthemes') # visualization
+library('scales') # visualization
+library('dplyr') # data manipulation
+library('mice') # imputation
+library('randomForest') # classification algorithm
+
+setwd("F:/Algorithmica/Excercises/Kaggle-I")
+train = read.csv("train.csv", stringsAsFactors = F)
+test = read.csv("test.csv", stringsAsFactors = F)
+full  <- bind_rows(train, test) # bind training & test data
+str(full)
+
+# Also reassign mlle, ms, and mme accordingly
+
+# Grab title from passenger names
+full$Title <- gsub('(.*, )|(\\..*)', '', full$Name)
+
+# Show title counts by sex
+table(full$Sex, full$Title)
+
+# Titles with very low cell counts to be combined to "rare" level
+rare_title <- c('Dona', 'Lady', 'the Countess','Capt', 'Col', 'Don', 'Dr', 'Major', 'Rev', 'Sir', 'Jonkheer')
+
+full$Title[full$Title == 'Mlle']        <- 'Miss' 
+full$Title[full$Title == 'Ms']          <- 'Miss'
+full$Title[full$Title == 'Mme']         <- 'Mrs' 
+full$Title[full$Title %in% rare_title]  <- 'Rare Title'
+
+# Show title counts by sex again
+table(full$Sex, full$Title)
+
+# Finally, grab surname from passenger name
+full$Surname <- sapply(full$Name, function(x) strsplit(x, split = '[,.]')[[1]][1])
+
+cat(paste('We have <b>', nlevels(factor(full$Surname)), '</b> unique surnames. I would be interested to infer ethnicity based on surname --- another time.'))
+
+## Do families sink or swim together?
+
+#Now that we've taken care of splitting passenger name into some new variables, we can take it a step further and make some new 
+#family variables. First we're going to make a **family size** variable based on number of siblings/spouse(s) (maybe someone has
+#more than one spouse?) and number of children/parents. 
+
+#```{r}
+# Create a family size variable including the passenger themselves
+
+full$Fsize <- full$SibSp + full$Parch + 1
+
+# Create a family variable 
+full$Family <- paste(full$Surname, full$Fsize, sep='_')
+
+#What does our family size variable look like? To help us understand how it may relate to survival, 
+#let's plot it among the training data.
+
+# Use ggplot2 to visualize the relationship between family size & survival
+ggplot(full[1:891,], aes(x = Fsize, fill = factor(Survived))) + geom_bar(stat='count', position='dodge') + scale_x_continuous(breaks=c(1:11)) +   labs(x = 'Family Size') +   theme_few()
+
+# Ah hah. We can see that there's a survival penalty to singletons and those with family sizes above 4. We can collapse 
+#this variable into three levels which will be helpful since there are comparatively fewer large families. Let's create 
+# a **discretized family size** variable.
+
+# Discretize family size
+full$FsizeD[full$Fsize == 1] <- 'singleton'
+full$FsizeD[full$Fsize < 5 & full$Fsize > 1] <- 'small'
+full$FsizeD[full$Fsize > 4] <- 'large'
+# Show family size by survival using a mosaic plot
+mosaicplot(table(full$FsizeD, full$Survived), main='Family Size by Survival', shade=TRUE)
+
+# The mosaic plot shows that we preserve our rule that there's a survival penalty among singletons and large families, 
+#but a benefit for passengers in small families. I want to do something further with our age variable, but 
+#`r sum(is.na(full$Age))` rows have missing age values, so we will have to wait until after we address missingness.
+
+## Treat a few more variables ...
+
+# What's left? There's probably some potentially useful information in the **passenger cabin** variable including about 
+#their **deck**. Let's take a look.
+
+# This variable appears to have a lot of missing values
+full$Cabin[1:28]
+
+# The first character is the deck. For example:
+strsplit(full$Cabin[2], NULL)[[1]]
+
+# Create a Deck variable. Get passenger deck A - F:
+full$Deck<-factor(sapply(full$Cabin, function(x) strsplit(x, NULL)[[1]][1]))
+
+# There's more that likely could be done here including looking into cabins with multiple rooms 
+#listed (e.g., row 28: "C23 C25 C27"), but given the sparseness of the column we'll stop here.
+
+# Missingness
+
+# Now we're ready to start exploring missing data and rectifying it through imputation. There are a number of different ways 
+#we could go about doing this. Given the small size of the dataset, we probably should not opt for deleting either entire 
+#observations (rows) or variables (columns) containing missing values. We're left with the option of either replacing missing 
+#values with a sensible values given the distribution of the data, e.g., the mean, median or mode. Finally, we could go with 
+#prediction. We'll use both of the two latter methods and I'll rely on some data visualization to guide our decisions.
+
+## Sensible value imputation
+
+# Passengers 62 and 830 are missing Embarkment
+full[c(62, 830), 'Embarked']
+cat(paste('We will infer their values for **embarkment** based on present data that we can imagine may be relevant: **passenger class** and **fare**. We see that they paid<b> $', full[c(62, 830), 'Fare'][[1]][1], '</b>and<b> $', full[c(62, 830), 'Fare'][[1]][2], '</b>respectively and their classes are<b>', full[c(62, 830), 'Pclass'][[1]][1], '</b>and<b>', full[c(62, 830), 'Pclass'][[1]][2], '</b>. So from where did they embark?'))
+# Get rid of our missing passenger IDs
+embark_fare <- full %>%  filter(PassengerId != 62 & PassengerId != 830)
+
+# Use ggplot2 to visualize embarkment, passenger class, & median fare
+
+ggplot(embark_fare, aes(x = Embarked, y = Fare, fill = factor(Pclass))) +
+  geom_boxplot() +
+  geom_hline(aes(yintercept=80), 
+             colour='red', linetype='dashed', lwd=2) +
+  scale_y_continuous(labels=dollar_format()) +
+  theme_few()
+
+# Voilà! The median fare for a first class passenger departing from Charbourg ('C') coincides nicely with the $80 paid by 
+#our embarkment-deficient passengers. I think we can safely replace the NA values with 'C'.
+
+# Since their fare was $80 for 1st class, they most likely embarked from 'C'
+
+full$Embarked[c(62, 830)] <- 'C'
+
+# We're close to fixing the handful of NA values here and there. Passenger on row 1044 has an NA Fare value.
+
+# Show row 1044
+full[1044, ]
+
+#This is a third class passenger who departed from Southampton ('S'). Let's visualize Fares among all others sharing their 
+#class and embarkment (n = `r nrow(full[full$Pclass == '3' & full$Embarked == 'S', ]) - 1`).
+
+
+ggplot(full[full$Pclass == '3' & full$Embarked == 'S', ],aes(x = Fare)) + geom_density(fill = '#99d6ff', alpha=0.4) + 
+  geom_vline(aes(xintercept=median(Fare, na.rm=T)),
+             colour='red', linetype='dashed', lwd=1) +
+  scale_x_continuous(labels=dollar_format()) +   theme_few()
+
+# Since their fare was $80 for 1st class, they most likely embarked from 'C'
+full$Embarked[c(62, 830)] <- 'C'
+
+# We're close to fixing the handful of NA values here and there. Passenger on row 1044 has an NA Fare value.
+
+# Show row 1044.
+
+full[1044, ]
+
+# This is a third class passenger who departed from Southampton ('S'). Let's visualize Fares among all others sharing 
+# their class and embarkment (n = `r nrow(full[full$Pclass == '3' & full$Embarked == 'S', ]) - 1`).
+
+ggplot(full[full$Pclass == '3' & full$Embarked == 'S', ], 
+       aes(x = Fare)) +
+  geom_density(fill = '#99d6ff', alpha=0.4) + 
+  geom_vline(aes(xintercept=median(Fare, na.rm=T)),
+             colour='red', linetype='dashed', lwd=1) +
+  scale_x_continuous(labels=dollar_format()) +
+  theme_few()
+
+# From this visualization, it seems quite reasonable to replace the NA Fare value with median for their class and embarkment 
+#which is $`r  median(full[full$Pclass == '3' & full$Embarked == 'S', ]$Fare, na.rm = TRUE)`.
+
+# Replace missing fare value with median fare for class/embarkment
+full$Fare[1044] <- median(full[full$Pclass == '3' & full$Embarked == 'S', ]$Fare, na.rm = TRUE)
+
+## Predictive imputation
+
+# Finally, as we noted earlier, there are quite a few missing **Age** values in our data. We are going to get a bit more 
+# fancy in imputing missing age values. Why? Because we can. We will create a model predicting ages based on other variables.
+
+# Show number of missing Age values
+sum(is.na(full$Age))
+
+# We could definitely use `rpart` (recursive partitioning for regression) to predict missing ages, but I'm going to use the 
+#`mice` package for this task just for something different. You can read more about multiple imputation using chained 
+#equations in r [here](http://www.jstatsoft.org/article/view/v045i03/v45i03.pdf) (PDF). Since we haven't done it yet, 
+#I'll first factorize the factor variables and then perform mice imputation.
+
+# Make variables factors into factors
+factor_vars <- c('PassengerId','Pclass','Sex','Embarked','Title','Surname','Family','FsizeD')
+
+full[factor_vars] <- lapply(full[factor_vars], function(x) as.factor(x))
+
+# Set a random seed
+set.seed(129)
+
+# Perform mice imputation, excluding certain less-than-useful variables:
+mice_mod <- mice(full[, !names(full) %in% c('PassengerId','Name','Ticket','Cabin','Family','Surname','Survived')], method='rf') 
+
+# Save the complete output 
+mice_output <- complete(mice_mod)
+
+# Let's compare the results we get with the original distribution of passenger ages to ensure that nothing has gone 
+# completely awry.
+
+# Plot age distributions
+par(mfrow=c(1,2))
+hist(full$Age, freq=F, main='Age: Original Data', col='darkgreen', ylim=c(0,0.04))
+hist(mice_output$Age, freq=F, main='Age: MICE Output', col='lightgreen', ylim=c(0,0.04))
+
+# Things look good, so let's replace our age vector in the original data with the output from the `mice` model.
+
+# Replace Age variable from the mice model.
+full$Age <- mice_output$Age
+
+# Show new number of missing Age values
+sum(is.na(full$Age))
+# We've finished imputing values for all variables that we care about for now! Now that we have a complete Age variable, there are just a few finishing touches I'd like to make. 
+# We can use Age to do just a bit more feature engineering ...
+
+## Feature Engineering: Round 2
+
+# Now that we know everyone's age, we can create a couple of new age-dependent variables: **Child** and **Mother**.
+# A child will simply be someone under 18 years of age and a mother is a passenger who is 1) female, 2) is over 18, 3) has more than 0 children (no kidding!), and 4) does not have the title 'Miss'.
+
+# First we'll look at the relationship between age & survival
+
+ggplot(full[1:891,], aes(Age, fill = factor(Survived))) + geom_histogram() + facet_grid(.~Sex) + theme_few()
+
+# I include Sex since we know (a priori) it's a significant predictor
